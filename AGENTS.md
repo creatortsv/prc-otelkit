@@ -2,7 +2,7 @@
 
 Shared Go library for Position Review Copilot observability: RED metrics
 middleware (`metrics`) and the Prometheus `/metrics` handler it serves.
-Module: `github.com/venomai-ltd/prc-otelkit`. Do not rename the module path
+Module: `github.com/creatortsv/prc-otelkit`. Do not rename the module path
 without lead sign-off — all seven Go services depend on this API.
 
 ## Standing mandates (apply to every agent working in this repo)

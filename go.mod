@@ -1,4 +1,4 @@
-module github.com/venomai-ltd/prc-otelkit
+module github.com/creatortsv/prc-otelkit
 
 go 1.25.0
 

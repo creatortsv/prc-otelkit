@@ -6,7 +6,7 @@ Two-line integration per service. Assumes Go 1.22+ `ServeMux` route patterns
 ## 1. Add the dependency (pinned)
 
 ```sh
-go get github.com/venomai-ltd/prc-otelkit@v0.1.0
+go get github.com/creatortsv/prc-otelkit@v0.1.0
 ```
 
 Commit `go.mod` and `go.sum`. Never use `replace` directives for shared PRC
@@ -15,7 +15,7 @@ modules.
 ## 2. Wire the middleware and the endpoint
 
 ```go
-import "github.com/venomai-ltd/prc-otelkit/metrics"
+import "github.com/creatortsv/prc-otelkit/metrics"
 
 func newMux() http.Handler {
 	mux := http.NewServeMux()

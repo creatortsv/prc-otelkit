@@ -23,7 +23,7 @@ implementation in seven services is seven chances to drift from the contract.
 ## Decision 1 — Shared module, mirroring the ratified prc-eventkit pattern
 
 `prc-otelkit` is a separate shared-kit repo (module
-`github.com/venomai-ltd/prc-otelkit`) with the same layout as `prc-eventkit`:
+`github.com/creatortsv/prc-otelkit`) with the same layout as `prc-eventkit`:
 own AGENTS.md, own CI matrix (standards §3 Go-services row), MIT license,
 docs + ADRs, conventional commits, PR-only merges. Services adopt via pinned
 `go get` (commit `go.mod`/`go.sum`; never `replace` directives).

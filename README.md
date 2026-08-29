@@ -43,7 +43,7 @@ Published per `prc-docs/operations/observability.md`:
 ## Quick start
 
 ```go
-import "github.com/venomai-ltd/prc-otelkit/metrics"
+import "github.com/creatortsv/prc-otelkit/metrics"
 
 mux := http.NewServeMux()
 mux.HandleFunc("GET /healthz", healthHandler)
@@ -76,7 +76,7 @@ the middleware hot path.
 ## Delivery contract
 
 - Adoption in services is via pinned version (`go get
-  github.com/venomai-ltd/prc-otelkit@vX.Y.Z`), commit `go.mod`/`go.sum`,
+  github.com/creatortsv/prc-otelkit@vX.Y.Z`), commit `go.mod`/`go.sum`,
   never `replace` directives.
 - Breaking API or metric-contract changes ship as a new minor/major tag with
   a migration note in `docs/usage.md`.
