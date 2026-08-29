@@ -1,0 +1,7 @@
+# Minimal config so golangci-lint runs reproducibly across tool upgrades
+# (version pinned in ci.yml). Same linter set as the v2 "standard" default,
+# declared explicitly.
+version: "2"
+
+linters:
+  default: standard
