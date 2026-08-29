@@ -1,12 +1,16 @@
 # prc-otelkit
 
 Shared observability library for Position Review Copilot: **RED metrics**
-(Rate · Errors · Duration) HTTP middleware and the Prometheus `/metrics`
-handler, used by all seven Go services.
+(Rate · Errors · Duration) HTTP middleware with the Prometheus `/metrics`
+handler, and **distributed tracing** (OTLP → Tempo, W3C `traceparent` over
+HTTP and Kafka, `trace_id` in slog logs), used by all seven Go services.
 
 Design rationale: [docs/adr/0001-otelkit-foundations.md](docs/adr/0001-otelkit-foundations.md) (Accepted) —
 shared module over per-service duplication, `prometheus/client_golang` as the
 ratified dependency, pattern-based route labels, §14 budget buckets.
+Tracing design: [docs/adr/0002-otelkit-tracing.md](docs/adr/0002-otelkit-tracing.md) —
+OpenTelemetry SDK, OTLP/HTTP export, W3C-only propagation, route-pattern
+span naming.
 Architecture overview: [docs/architecture.md](docs/architecture.md).
 Service-team integration guide: [docs/usage.md](docs/usage.md).
 
@@ -33,24 +37,39 @@ Published per `prc-docs/operations/observability.md`:
 | Package | Purpose |
 | --- | --- |
 | `metrics` | `Middleware` (RED recording around an `http.Handler`) + `Handler` (`/metrics` exposition) |
+| `tracing` | `Init` (global tracer provider, OTLP/HTTP → Tempo), `Middleware` (server spans from W3C headers), `NewTransport` (client spans + injection), `Inject`/`Extract` (Kafka header propagation), `TraceID` + `NewLogHandler` (`trace_id` in slog) |
 
 ## Requirements
 
 - Go 1.25+ (declared floor in `go.mod`; CI pins the 1.27 toolchain)
-- Runtime dep: `github.com/prometheus/client_golang` (standards §13 mandate,
-  dependency verdict in ADR-0001)
+- Runtime deps (each with a dependency verdict in an ADR):
+  - `github.com/prometheus/client_golang` — standards §13 mandate (ADR-0001)
+  - `go.opentelemetry.io/otel`, `go.opentelemetry.io/otel/sdk`,
+    `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`,
+    `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp`
+    (standards §13 mandate, ADR-0002)
 
 ## Quick start
 
 ```go
-import "github.com/creatortsv/prc-otelkit/metrics"
+import (
+	"github.com/creatortsv/prc-otelkit/metrics"
+	"github.com/creatortsv/prc-otelkit/tracing"
+)
+
+shutdown, err := tracing.Init(ctx, tracing.Config{ServiceName: "prc-auth"})
+defer shutdown(ctx)
 
 mux := http.NewServeMux()
 mux.HandleFunc("GET /healthz", healthHandler)
 mux.HandleFunc("GET /metrics", metrics.Handler().ServeHTTP)
 
-http.ListenAndServe(addr, metrics.Middleware(mux))
+http.ListenAndServe(addr, tracing.Middleware(metrics.Middleware(mux)))
 ```
+
+Without an endpoint configured (no `OTLPEndpoint`, no
+`OTEL_EXPORTER_OTLP_ENDPOINT`) tracing stays disabled and all helpers
+degrade to zero-op — local development needs no Tempo.
 
 ## Development
 
@@ -69,9 +88,10 @@ CI (`.github/workflows/ci.yml`) runs the full standards §3 matrix:
 ## Performance budget
 
 Middleware overhead target < 5 ms p95 added per request (standards §14).
-Measured with the in-repo benchmark: ~0.2 µs/op, 35 B, 2 allocs on an M1 Pro
-— three orders of magnitude under budget. Re-run the benchmark when touching
-the middleware hot path.
+Measured with the in-repo benchmarks: metrics ~0.2 µs/op, 35 B, 2 allocs;
+tracing middleware ~0.4 µs/op, 952 B, 13 allocs on an M1 Pro — three to four
+orders of magnitude under budget. Re-run benchmarks when touching either hot
+path.
 
 ## Delivery contract
 

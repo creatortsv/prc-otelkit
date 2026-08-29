@@ -1,8 +1,10 @@
 # AGENTS.md — prc-otelkit
 
 Shared Go library for Position Review Copilot observability: RED metrics
-middleware (`metrics`) and the Prometheus `/metrics` handler it serves.
-Module: `github.com/creatortsv/prc-otelkit`. Do not rename the module path
+middleware (`metrics`) with the Prometheus `/metrics` handler, and
+distributed tracing (`tracing`: OTLP → Tempo, W3C traceparent over HTTP and
+Kafka, `trace_id` in slog logs). Module:
+`github.com/creatortsv/prc-otelkit`. Do not rename the module path
 without lead sign-off — all seven Go services depend on this API.
 
 ## Standing mandates (apply to every agent working in this repo)
@@ -16,11 +18,16 @@ without lead sign-off — all seven Go services depend on this API.
 
 ## Conventions
 
-- Stdlib-first. The single third-party dependency is
-  `github.com/prometheus/client_golang` — mandated by standards §13
-  (Prometheus metrics) and ratified for this module in
-  [ADR-0001](docs/adr/0001-otelkit-foundations.md). Any new dependency needs a
-  board-approved ADR.
+- Stdlib-first. Ratified third-party dependencies (any new one needs a
+  board-approved ADR):
+  - `github.com/prometheus/client_golang` — mandated by standards §13
+    (Prometheus metrics), ratified in
+    [ADR-0001](docs/adr/0001-otelkit-foundations.md).
+  - `go.opentelemetry.io/otel` (+ `otel/sdk`, OTLP/HTTP exporter,
+    `otelhttp` contrib) — mandated by standards §13 (traces → Tempo, W3C
+    traceparent), ratified in
+    [ADR-0002](docs/adr/0002-otelkit-tracing.md). No direct gRPC dependency:
+    OTLP/HTTP is the only export protocol until an ADR adds another.
 - English identifiers, comments, commits. Conventional commits.
 - Tests: stdlib `testing`, table-driven; fully hermetic (no external services
   — `go test ./...` must stay green offline).
@@ -35,9 +42,11 @@ without lead sign-off — all seven Go services depend on this API.
 ```sh
 go build ./...
 go test ./... -race
-go test ./metrics -bench .      # middleware overhead vs bare mux
+go test ./metrics ./tracing -bench .   # middleware overhead vs bare mux
 ```
 
 CI matrix and status-check names: `.github/workflows/ci.yml`.
 Docs: [README.md](README.md) · [docs/architecture.md](docs/architecture.md) ·
-[docs/usage.md](docs/usage.md) · [docs/adr/0001-otelkit-foundations.md](docs/adr/0001-otelkit-foundations.md).
+[docs/usage.md](docs/usage.md) ·
+[ADR-0001](docs/adr/0001-otelkit-foundations.md) ·
+[ADR-0002](docs/adr/0002-otelkit-tracing.md).
