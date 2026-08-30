@@ -1,0 +1,15 @@
+# Test and coverage artifacts
+*.out
+*.test
+coverage.txt
+
+# Local editor/IDE
+.idea/
+.vscode/
+*.swp
+
+# OS noise
+.DS_Store
+
+# Local scratch
+/tmp/
