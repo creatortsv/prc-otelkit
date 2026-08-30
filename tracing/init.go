@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,6 +37,12 @@ import (
 // Infra injects it (e.g. http://tempo:4318) into every service deployment;
 // Config.OTLPEndpoint overrides it for explicit wiring.
 const envEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+// shutdownTimeout bounds the flush performed by the shutdown function Init
+// returns. An unbounded exporter Shutdown would eat the Kubernetes grace
+// period when Tempo is unreachable; the tail batch is dropped instead of
+// hanging process exit.
+const shutdownTimeout = 5 * time.Second
 
 // Resource attribute keys follow the OpenTelemetry semantic conventions.
 // Plain constants keep the package free of per-release semconv subpackage
@@ -78,6 +85,9 @@ type Config struct {
 // queue, drops on overflow — export never blocks request handling) to the
 // configured OTLP/HTTP endpoint. It returns a shutdown function that flushes
 // pending spans and releases the exporter; services must defer it in main.
+// The flush is bounded at 5 s (shutdownTimeout): if the exporter cannot
+// deliver in time — e.g. Tempo is down during pod termination — the tail
+// batch is dropped rather than hanging the container past its grace period.
 //
 // When no endpoint is configured the returned shutdown is a no-op and the
 // global provider stays a no-op: spans are created but never recorded, so
@@ -119,7 +129,11 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	)
 	otel.SetTracerProvider(provider)
 
-	return provider.Shutdown, nil
+	return func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+		defer cancel()
+		return provider.Shutdown(ctx)
+	}, nil
 }
 
 // exporterOptions translates a base endpoint URL (e.g.

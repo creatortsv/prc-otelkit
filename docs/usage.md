@@ -105,7 +105,9 @@ func main() {
 The export path is batched and non-blocking (default batch processor:
 5 s delay, bounded queue, drop on overflow) — spans never block requests.
 Sampling defaults to "everything"; set `SampleRatio` (0, 1] to thin out
-root spans — children follow their parent.
+root spans — children follow their parent. The shutdown flush is bounded
+at 5 s: if Tempo is unreachable during pod termination, the tail batch is
+dropped instead of hanging the container past its grace period.
 
 ## Wrap mux, client, and logger
 
@@ -144,14 +146,23 @@ ctx = tracing.Extract(ctx, headers)   // continue the trace on the other side
   headers.
 - Spans named `GET /users/{id}`-style, agreeing with the metrics `route`
   label; unmatched requests named `METHOD unmatched`.
-- Server spans marked with error status when the response status is ≥ 500.
+- Server spans marked with error status when the response status is ≥ 500;
+  a handler panic produces the same classification the RED middleware
+  records — a 500 error span with the panic value attached
+  (`http.ErrAbortHandler` aborts are recorded as 499, not errors).
 - `service.name` from `Config.ServiceName` (+ optional version/environment
   attributes); sampling via `Config.SampleRatio` (ParentBased).
 
 ## Gotchas
 
 - Call `defer shutdown(ctx)` — without it the last batch of spans may be
-  lost on exit.
+  lost on exit. The flush is bounded at 5 s (see above), so it can never
+  exceed the Kubernetes grace period.
+- Do not call `.WithGroup(...)` on loggers whose records must link to
+  Tempo: `NewLogHandler` emits `trace_id` as a top-level record attribute,
+  and grouped attributes nest under the group key (e.g. `"req.trace_id"`),
+  which the Loki derivedFields link — matched against the top-level key —
+  will not resolve.
 - Always close response bodies of clients wrapped with
   `tracing.NewTransport`: the client span ends when the body is closed (an
   `otelhttp` contract), and an unclosed body leaks an open span.

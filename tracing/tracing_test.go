@@ -1,10 +1,14 @@
 package tracing
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -248,6 +252,152 @@ func attrValue(span sdktrace.ReadOnlySpan, key string) string {
 		}
 	}
 	return ""
+}
+
+// newQuietServer starts an httptest server whose panic logging is discarded:
+// the middleware re-raises handler panics (mirroring net/http behavior), and
+// the server logs them per connection — noise the tests need not print.
+func newQuietServer(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestMiddlewarePanicProducesErrorSpan(t *testing.T) {
+	exp := installCapture(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /panic", func(_ http.ResponseWriter, _ *http.Request) {
+		panic(errors.New("boom"))
+	})
+	srv := newQuietServer(t, Middleware(mux))
+
+	_, err := http.Get(srv.URL + "/panic")
+	if err == nil {
+		t.Fatal("request over panicking handler: expected connection error, got nil")
+	}
+
+	spans := exp.recorded()
+	if len(spans) != 1 {
+		t.Fatalf("captured %d spans, want 1", len(spans))
+	}
+	span := spans[0]
+	// The finalizer must have run despite the panic: the span is named from
+	// the matched pattern, classified like the RED middleware (500), and
+	// carries the panic value as an exception event.
+	if span.Name() != "GET /panic" {
+		t.Errorf("span name = %q, want %q", span.Name(), "GET /panic")
+	}
+	if span.Status().Code != codes.Error {
+		t.Errorf("span status = %v, want Error", span.Status().Code)
+	}
+	if got := attrValue(span, attrHTTPStatusCode); got != "500" {
+		t.Errorf("status attr = %v, want 500", got)
+	}
+	if got := attrValue(span, attrHTTPRoute); got != "GET /panic" {
+		t.Errorf("route attr = %v, want %q", got, "GET /panic")
+	}
+	var exceptionEvents int
+	for _, ev := range span.Events() {
+		if ev.Name == "exception" {
+			exceptionEvents++
+		}
+	}
+	if exceptionEvents != 1 {
+		t.Errorf("exception events = %d, want 1 (panic value recorded)", exceptionEvents)
+	}
+}
+
+func TestMiddlewareErrAbortHandlerAbortsAs499(t *testing.T) {
+	exp := installCapture(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /abort", func(_ http.ResponseWriter, _ *http.Request) {
+		panic(http.ErrAbortHandler)
+	})
+	srv := newQuietServer(t, Middleware(mux))
+
+	_, err := http.Get(srv.URL + "/abort")
+	if err == nil {
+		t.Fatal("request over aborting handler: expected connection error, got nil")
+	}
+
+	spans := exp.recorded()
+	if len(spans) != 1 {
+		t.Fatalf("captured %d spans, want 1", len(spans))
+	}
+	span := spans[0]
+	// Deliberate connection abort: classified 499 like the RED middleware
+	// records it — not a server-error span.
+	if span.Name() != "GET /abort" {
+		t.Errorf("span name = %q, want %q", span.Name(), "GET /abort")
+	}
+	if got := attrValue(span, attrHTTPStatusCode); got != "499" {
+		t.Errorf("status attr = %v, want 499", got)
+	}
+	if span.Status().Code == codes.Error {
+		t.Error("span status = Error, want unset (client-closed request is not a server error)")
+	}
+}
+
+func TestMiddlewareNormalizesMethod(t *testing.T) {
+	exp := installCapture(t)
+
+	srv := httptest.NewServer(Middleware(http.NotFoundHandler()))
+	defer srv.Close()
+
+	req, _ := http.NewRequestWithContext(context.Background(), "PROPFIND", srv.URL+"/nowhere", nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = res.Body.Close()
+
+	spans := exp.recorded()
+	if len(spans) != 1 {
+		t.Fatalf("captured %d spans, want 1", len(spans))
+	}
+	span := spans[0]
+	// An attacker-controlled method token must not leak into span names or
+	// attributes — it collapses into the shared bounded "other" value.
+	if span.Name() != "other unmatched" {
+		t.Errorf("span name = %q, want %q", span.Name(), "other unmatched")
+	}
+	if got := attrValue(span, attrHTTPMethod); got != "other" {
+		t.Errorf("method attr = %v, want %q", got, "other")
+	}
+}
+
+// fakeHijacker is a ResponseWriter that additionally implements http.Hijacker.
+type fakeHijacker struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (f *fakeHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	f.hijacked = true
+	return nil, nil, nil
+}
+
+func TestStatusResponseWriterHijackPassthrough(t *testing.T) {
+	fh := &fakeHijacker{ResponseWriter: httptest.NewRecorder()}
+	w := &statusResponseWriter{ResponseWriter: fh}
+	if _, ok := any(w).(http.Hijacker); !ok {
+		t.Fatal("statusResponseWriter does not satisfy http.Hijacker")
+	}
+	if _, _, err := w.Hijack(); err != nil {
+		t.Fatalf("Hijack passthrough: %v", err)
+	}
+	if !fh.hijacked {
+		t.Fatal("Hijack did not reach the underlying writer")
+	}
+
+	if _, _, err := (&statusResponseWriter{ResponseWriter: httptest.NewRecorder()}).Hijack(); err == nil {
+		t.Fatal("Hijack on non-Hijacker writer: want error, got nil")
+	}
 }
 
 func TestNewTransportInjectsTraceparent(t *testing.T) {
