@@ -130,10 +130,15 @@ envelope sent to a fake ingestion endpoint:
   body, no cookies, no headers.
 - Client-level `BeforeSend` additionally filters any request data through a
   header allowlist (`Accept`, `Content-Type`, `Content-Length`,
-  `Accept-Encoding`, `Referer`, `User-Agent`) and clears user IP, so data
-  attached by other code paths cannot leak.
+  `Accept-Encoding`, `User-Agent` — `Referer` is dropped, it echoes full
+  URLs) and zeroes the user object and scope-set `Tags`/`Extra`/`Contexts`
+  (only the SDK-managed trace context survives), so data attached by other
+  code paths cannot leak.
 - Sensitive breadcrumbs (categories `http`, `request`, `response`, `query`)
   are dropped before send.
+- Panic values are reported verbatim (wrapped as `panic: %v`): never panic
+  with values containing credentials or PII — the recoverer cannot scrub
+  what it cannot interpret.
 
 Never call `sentry-go` directly from services and never set
 `send_default_pii` — route all capture through this package.

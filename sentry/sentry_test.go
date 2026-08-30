@@ -38,9 +38,15 @@ func newEnvelopeServer(t *testing.T) *envelopeServer {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(e.srv.Close)
-	e.dsn = fmt.Sprintf("http://pubkey@%s/42", strings.TrimPrefix(e.srv.URL, "http://"))
+	// The DSN carries a secret component on purpose: the canary below is
+	// only meaningful if the test DSN contains secret material that the
+	// envelope must never carry.
+	e.dsn = fmt.Sprintf("http://pubkey:%s@%s/42", dsnSecret, strings.TrimPrefix(e.srv.URL, "http://"))
 	return e
 }
+
+// dsnSecret is the canary baked into the test DSN.
+const dsnSecret = "canary-dsn-secret-7f3a"
 
 func (e *envelopeServer) nextBody(t *testing.T) string {
 	t.Helper()
@@ -136,14 +142,18 @@ func TestCapturePanicEnvelopeScrubbed(t *testing.T) {
 		}
 	}
 
-	// Envelope header carries the DSN per protocol; it must contain no
-	// secret component (modern DSN secret is empty — pub:secret@ must never
-	// appear) and the event item itself must not embed DSN material.
+	// Envelope header carries the DSN per protocol (auth material for the
+	// ingestion endpoint, TLS-protected) — with a secret-bearing test DSN it
+	// is expected there. The REAL scrubbing boundary is the event item
+	// payload: it must never embed the DSN or its secret material.
 	header := body[:strings.IndexByte(body, '\n')]
-	if strings.Contains(header, "pubkey:secret") {
-		t.Errorf("envelope DSN contains a secret component: %s", header)
+	if !strings.Contains(header, "public_key\":\"pubkey") {
+		t.Errorf("envelope header does not authenticate the test DSN: %s", header)
 	}
 	eventItem := body[strings.LastIndexByte(body, '\n')+1:]
+	if strings.Contains(eventItem, dsnSecret) {
+		t.Errorf("event payload carries the DSN secret component: %s", eventItem)
+	}
 	if strings.Contains(eventItem, `"dsn"`) {
 		t.Errorf("event item embeds DSN material: %s", eventItem)
 	}
@@ -167,6 +177,7 @@ func TestScrubEventHeaderAllowlist(t *testing.T) {
 				"X-API-Key":     "leak-me",
 				"Content-Type":  "application/json",
 				"User-Agent":    "keep-me",
+				"Referer":       "https://evil.example/reset?one-time-code=leak-me",
 			},
 		},
 		User: sentrygo.User{IPAddress: "10.0.0.1"},
@@ -192,6 +203,77 @@ func TestScrubEventHeaderAllowlist(t *testing.T) {
 	}
 	if req.URL != "http://svc/reset" {
 		t.Errorf("query not stripped from URL: %s", req.URL)
+	}
+}
+
+// TestScrubEventDropsReferer pins Referer removal: its value echoes full
+// URLs and can smuggle query strings carrying tokens or personal data.
+func TestScrubEventDropsReferer(t *testing.T) {
+	event := &sentrygo.Event{
+		Request: &sentrygo.Request{
+			Method:  http.MethodGet,
+			URL:     "http://svc/page",
+			Headers: map[string]string{"Referer": "https://mail.example/inbox?token=referer-secret"},
+		},
+	}
+	clean := scrubEvent(event, nil)
+	if clean.Request.Headers["Referer"] != "" {
+		t.Errorf("Referer survived scrubbing: %q", clean.Request.Headers["Referer"])
+	}
+	if strings.Contains(clean.Request.URL, "referer-secret") {
+		t.Error("referer secret leaked through URL")
+	}
+}
+
+// TestScrubEventZeroesUserWithoutIP: a scope-set user without an IP address
+// must be zeroed too — email/username/id are PII regardless of IP presence.
+func TestScrubEventZeroesUserWithoutIP(t *testing.T) {
+	event := &sentrygo.Event{
+		User: sentrygo.User{Email: "user@example.com", Username: "pii-user", ID: "42"},
+	}
+	clean := scrubEvent(event, nil)
+	if clean.User.ID != "" || clean.User.Email != "" || clean.User.Username != "" || clean.User.IPAddress != "" {
+		t.Errorf("IP-less user survived: %+v", clean.User)
+	}
+}
+
+// TestScrubEventDropsScopeData: scope-set Tags and Contexts never reach
+// Sentry (they may carry PII); only the SDK-managed trace context survives
+// for correlation. sentry-go v0.49.0 has no Event Extra field.
+func TestScrubEventDropsScopeData(t *testing.T) {
+	event := &sentrygo.Event{
+		Tags: map[string]string{"tenant": "acme-corp"},
+		Contexts: map[string]sentrygo.Context{
+			"trace":          {"trace_id": "abc"},
+			"scope-injected": {"email": "user@example.com"},
+		},
+	}
+	clean := scrubEvent(event, nil)
+	if clean.Tags != nil {
+		t.Errorf("tags survived: %v", clean.Tags)
+	}
+	if _, ok := clean.Contexts["trace"]; !ok {
+		t.Error("SDK-managed trace context must survive")
+	}
+	for k := range clean.Contexts {
+		if k != "trace" {
+			t.Errorf("scope-set context survived: %s", k)
+		}
+	}
+}
+
+// TestInitErrorReturnsNoOpShutdown: on a malformed DSN the returned shutdown
+// must be callable (the documented defer pattern), and the error must never
+// carry DSN secret material.
+func TestInitErrorReturnsNoOpShutdown(t *testing.T) {
+	const secretDSN = "https://pubkey:leaky-secret@bad host path/42"
+	enabled, shutdown, err := Init(Config{DSN: secretDSN})
+	if enabled || err == nil {
+		t.Fatalf("malformed DSN must fail init: enabled=%v err=%v", enabled, err)
+	}
+	shutdown(context.Background()) // must not panic
+	if strings.Contains(err.Error(), "leaky-secret") || strings.Contains(err.Error(), "pubkey") {
+		t.Errorf("init error embeds DSN material: %v", err)
 	}
 }
 

@@ -14,6 +14,9 @@
 //     other code paths, so sensitive values cannot leak through the scope.
 //   - Sensitive HTTP breadcrumbs (auto-captured request/response breadcrumbs
 //     carrying URLs or sensitive header data) are dropped before send.
+//   - Panic values captured via CapturePanic are reported verbatim (wrapped
+//     as "panic: %v"). Never panic with values containing credentials or
+//     PII — the recoverer cannot scrub what it cannot interpret.
 //   - An empty DSN means disabled: every helper is a no-op, so services can
 //     keep the same wiring in every environment (local keeps SENTRY_DSN
 //     unset/empty; stage and prod receive the real DSN from a cluster
@@ -24,6 +27,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	sentrygo "github.com/getsentry/sentry-go"
@@ -49,15 +53,23 @@ type Config struct {
 // Init bootstraps the global hub. It returns whether the SDK is enabled and
 // a shutdown func that flushes buffered events (safe to defer in main).
 // With an empty DSN it returns enabled=false and a no-op shutdown — the
-// disabled pattern used by the local environment.
+// disabled pattern used by the local environment. On init failure it also
+// returns a no-op shutdown, so a caller that defers the shutdown regardless
+// of the error never panics. DSN parse failures are reported without the
+// DSN material itself (host and project id only).
 func Init(cfg Config) (enabled bool, shutdown func(context.Context), err error) {
-	if cfg.DSN == "" {
+	if strings.TrimSpace(cfg.DSN) == "" {
+		// Defense-in-depth: unbind any client a previous Init (or another
+		// library) left on the global hub, so nothing can fire events in
+		// the disabled mode.
+		sentrygo.CurrentHub().BindClient(nil)
 		return false, func(context.Context) {}, nil
 	}
 	timeout := cfg.FlushTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	noOp := func(context.Context) {}
 	if err := sentrygo.Init(sentrygo.ClientOptions{
 		Dsn:              cfg.DSN,
 		Environment:      cfg.Environment,
@@ -81,12 +93,37 @@ func Init(cfg Config) (enabled bool, shutdown func(context.Context), err error) 
 		BeforeSend:       scrubEvent,
 		BeforeBreadcrumb: dropSensitiveBreadcrumb,
 	}); err != nil {
-		return false, nil, fmt.Errorf("sentry: init: %w", err)
+		// The SDK's DSN parse error embeds the raw DSN (public key AND
+		// secret). Never surface that material: report host and project id
+		// only.
+		return false, noOp, fmt.Errorf("sentry: init: %w", sanitizeDSNError(cfg.DSN, err))
 	}
 	shutdown = func(ctx context.Context) {
 		sentrygo.CurrentHub().Flush(timeout)
 	}
 	return true, shutdown, nil
+}
+
+// sanitizeDSNError replaces a DSN parse error with a message that carries no
+// DSN material: the SDK's error embeds the raw DSN (public key and secret),
+// so it is never surfaced — not even wrapped. Only host and project id are
+// reported; if the DSN is too malformed to split those out, it reports
+// nothing but the failure itself.
+func sanitizeDSNError(dsn string, _ error) error {
+	// Expected shape: scheme://publicKey[:secret]@host/projectId
+	rest, _, ok := strings.Cut(dsn, "://")
+	if !ok {
+		return fmt.Errorf("invalid DSN")
+	}
+	rest, _, ok = strings.Cut(rest, "@") // drop public key and secret
+	if !ok {
+		return fmt.Errorf("invalid DSN")
+	}
+	host, projectID, ok := strings.Cut(rest, "/")
+	if !ok || host == "" || projectID == "" {
+		return fmt.Errorf("invalid DSN")
+	}
+	return fmt.Errorf("invalid DSN for host %q, project %q", host, projectID)
 }
 
 // CapturePanic reports a recovered panic value from a service-level recoverer

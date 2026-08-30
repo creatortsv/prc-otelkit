@@ -8,26 +8,34 @@ import (
 
 // headerAllowlist is the only request header content that may leave the
 // service. Everything else (Authorization, Cookie, Set-Cookie, X-API-Key,
-// arbitrary custom headers carrying tokens) is removed by scrubEvent.
+// Referer — it echoes full URLs including query strings — and arbitrary
+// custom headers carrying tokens) is removed by scrubEvent.
 var headerAllowlist = map[string]struct{}{
 	"Accept":          {},
 	"Accept-Encoding": {},
 	"Content-Length":  {},
 	"Content-Type":    {},
-	"Referer":         {},
 	"User-Agent":      {},
 }
 
 // scrubEvent is the client-level BeforeSend hook. It enforces the privacy
-// contract on every event regardless of which code path attached request
-// data: headers are filtered through an allowlist, cookies, query string and
-// body are removed, and the user IP address is cleared.
+// contract on every event regardless of which code path attached data:
+// headers are filtered through an allowlist, cookies, query string and body
+// are removed, the user object is zeroed unconditionally, and scope-set
+// Tags/Contexts are dropped (they may carry PII; services must not treat
+// them as a transport for sensitive values — sentry-go v0.49.0 has no Event
+// Extra field at all). Only the SDK-managed "trace" context survives,
+// preserving trace correlation.
 func scrubEvent(event *sentrygo.Event, _ *sentrygo.EventHint) *sentrygo.Event {
 	if event == nil {
 		return nil
 	}
-	if event.User.IPAddress != "" {
-		event.User = sentrygo.User{}
+	event.User = sentrygo.User{}
+	event.Tags = nil
+	for k := range event.Contexts {
+		if k != "trace" {
+			delete(event.Contexts, k)
+		}
 	}
 	if event.Request != nil {
 		event.Request = scrubbedSentryRequest(event.Request)
