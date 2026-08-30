@@ -79,3 +79,66 @@ Prefix service-specific metric names with `prc_<service>_`.
 - Pod annotations for Prometheus scraping (`prometheus.io/scrape` etc.) are
   DevOps-owned in `prc-infra/k8s/30-services.yaml`; backend only guarantees
   the `/metrics` endpoint.
+
+## 3. Sentry error capture (v0.2.0+)
+
+Two lines per service, plus one call inside the existing panic recoverer.
+Bootstrap in `main`:
+
+```go
+import "github.com/creatortsv/prc-otelkit/sentry"
+
+enabled, shutdown, err := sentry.Init(sentry.Config{
+	DSN:         os.Getenv("SENTRY_DSN"),
+	Environment: os.Getenv("SENTRY_ENVIRONMENT"),
+	Release:     os.Getenv("SENTRY_RELEASE"), // deployed image tag
+	ServiceName: "prc-auth",
+})
+if err != nil {
+	logger.Error("sentry init failed", "err", err)
+}
+defer shutdown(context.Background())
+```
+
+An empty `SENTRY_DSN` disables the SDK — every helper becomes a no-op, so
+the same wiring runs in every environment. The DSN arrives from a cluster
+Secret (`sentry-dsns`), never from git; `SENTRY_RELEASE` is set by the
+manifests to the image tag.
+
+Capture inside the service recoverer (after you have recovered and before
+writing the 500):
+
+```go
+if rec := recover(); rec != nil {
+	sentry.CapturePanic(rec, r) // r contributes method+path only
+	// ... existing 500 handling
+}
+```
+
+`errors` surfaced outside a recoverer can use `sentry.CaptureError(err, r)`.
+
+### Privacy contract (verified by test)
+
+`sentry/sentry_test.go` pins the contract by asserting on the serialized
+envelope sent to a fake ingestion endpoint:
+
+- Automatic data collection is hardwired **off** via `ClientOptions.DataCollection`
+  (cookies, HTTP headers, bodies, query params, user info) and not
+  configurable — equivalent to the deprecated `SendDefaultPII=false`, but
+  stricter: categories are off, not merely denylisted.
+- Request context reported is **method + path only** — no query string, no
+  body, no cookies, no headers.
+- Client-level `BeforeSend` additionally filters any request data through a
+  header allowlist (`Accept`, `Content-Type`, `Content-Length`,
+  `Accept-Encoding`, `User-Agent` — `Referer` is dropped, it echoes full
+  URLs) and zeroes the user object and scope-set `Tags`/`Extra`/`Contexts`
+  (only the SDK-managed trace context survives), so data attached by other
+  code paths cannot leak.
+- Sensitive breadcrumbs (categories `http`, `request`, `response`, `query`)
+  are dropped before send.
+- Panic values are reported verbatim (wrapped as `panic: %v`): never panic
+  with values containing credentials or PII — the recoverer cannot scrub
+  what it cannot interpret.
+
+Never call `sentry-go` directly from services and never set
+`send_default_pii` — route all capture through this package.
