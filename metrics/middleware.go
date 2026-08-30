@@ -11,10 +11,20 @@
 // The route label is the registered Go 1.22+ ServeMux pattern
 // (http.Request.Pattern, e.g. "GET /users/{id}"), never the concrete request
 // path — raw paths are unbounded label cardinality under live load. Requests
-// the mux cannot match to any pattern are labeled "unmatched".
+// the mux cannot match to any pattern are labeled "unmatched" (this also
+// absorbs method-mismatch 405s and scheme/host redirects, which the mux
+// answers without matching a pattern).
+//
+// The method label is normalized: only the standard HTTP method tokens are
+// recorded verbatim; anything else (net/http accepts arbitrary tokens) is
+// collapsed into "other" — an attacker-controlled method string would
+// otherwise be an unbounded cardinality vector.
 package metrics
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -24,8 +34,36 @@ import (
 )
 
 // unmatchedRoute labels requests that matched no registered pattern
-// (typically 404s). A constant keeps the route label cardinality bounded.
+// (404s, method-mismatch 405s, redirects). A constant keeps the route label
+// cardinality bounded.
 const unmatchedRoute = "unmatched"
+
+// allowedMethods is the fixed set of standard HTTP method tokens recorded
+// verbatim in the method label. net/http accepts arbitrary method tokens, so
+// anything outside this set — attacker-controlled or exotic — is collapsed
+// into otherMethod to keep the label cardinality bounded.
+var allowedMethods = map[string]struct{}{
+	http.MethodConnect: {},
+	http.MethodDelete:  {},
+	http.MethodGet:     {},
+	http.MethodHead:    {},
+	http.MethodOptions: {},
+	http.MethodPatch:   {},
+	http.MethodPost:    {},
+	http.MethodPut:     {},
+	http.MethodTrace:   {},
+}
+
+// otherMethod labels every request whose method is not in allowedMethods.
+const otherMethod = "other"
+
+// normalizedMethod maps a raw method token onto its bounded label value.
+func normalizedMethod(method string) string {
+	if _, ok := allowedMethods[method]; ok {
+		return method
+	}
+	return otherMethod
+}
 
 // requestDurationBuckets are the histogram upper bounds, in seconds. The
 // standards §14 budget lines — 0.3 (target) and 1.0 (hard limit) — are
@@ -54,8 +92,11 @@ var (
 //
 // The route label is resolved from http.Request.Pattern, which the ServeMux
 // sets while matching; it is therefore read after next.ServeHTTP returns.
-// Recording is deferred, so it also covers handlers that panic — net/http
-// still aborts the connection and logs the panic exactly as it would without
+// Recording is deferred. If the wrapped handler panics, the request is
+// recorded with status 500 (a panicking request is an error even when no
+// status was written — recording the implicit 200 would systematically
+// undercount the RED error-rate panel) and the panic is re-raised, so
+// net/http still aborts the connection and logs exactly as it would without
 // the middleware; no recovery is added here. A handler that returns without
 // writing anything is recorded with the implicit 200.
 func Middleware(next http.Handler) http.Handler {
@@ -67,8 +108,16 @@ func Middleware(next http.Handler) http.Handler {
 			if route == "" {
 				route = unmatchedRoute
 			}
-			requestsTotal.WithLabelValues(route, r.Method, strconv.Itoa(rw.statusOrOK())).Inc()
-			requestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+			method := normalizedMethod(r.Method)
+			record := func(status int) {
+				requestsTotal.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
+				requestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+			}
+			if p := recover(); p != nil {
+				record(http.StatusInternalServerError)
+				panic(p)
+			}
+			record(rw.statusOrOK())
 		}()
 		next.ServeHTTP(rw, r)
 	})
@@ -106,8 +155,26 @@ func (w *recordingResponseWriter) Flush() {
 	}
 }
 
+// Hijack passes through for handlers that take over the connection
+// (e.g. WebSocket upgrades), keeping the wrapper transparent for
+// http.Hijacker consumers.
+func (w *recordingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("recordingResponseWriter: underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// Unwrap returns the underlying ResponseWriter so http.ResponseController
+// can reach through the wrapper for extensions beyond Flush/Hijack.
+func (w *recordingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // statusOrOK returns the captured status, defaulting to 200 for handlers
 // that returned without writing anything (Go answers 200 implicitly).
+// Panicking handlers bypass this and are recorded as 500 instead.
 func (w *recordingResponseWriter) statusOrOK() int {
 	if !w.wroteHeader {
 		return http.StatusOK

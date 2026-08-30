@@ -25,13 +25,12 @@ Third-party licenses (as required by venom-engineering-standards §5 — every
 dependency's license is checked and recorded; full texts ship in each module
 cache entry under the file LICENSE/COPYING):
 
-  github.com/jackc/pgx/v5 v5.10.0                        MIT
-  github.com/twmb/franz-go v1.21.6                       MIT
-  github.com/twmb/franz-go/pkg/kmsg v1.13.1              MIT
-  github.com/jackc/pgpassfile v1.0.0                     MIT
-  github.com/jackc/pgservicefile v0.0.0-20240606120523   MIT
-  github.com/jackc/puddle/v2 v2.2.2                      MIT
-  github.com/klauspost/compress v1.18.7                  BSD-3-Clause
-  github.com/pierrec/lz4/v4 v4.1.26                      BSD-3-Clause
-  golang.org/x/sync v0.17.0                              BSD-3-Clause
-  golang.org/x/text v0.29.0                              BSD-3-Clause
+  github.com/prometheus/client_golang v1.24.1 (direct)   Apache-2.0
+  github.com/beorn7/perks v1.0.1                         MIT
+  github.com/cespare/xxhash/v2 v2.3.0                    MIT
+  github.com/munnerz/goautoneg                           BSD-3-Clause
+  github.com/prometheus/client_model v0.6.2              Apache-2.0
+  github.com/prometheus/common v0.70.1                   Apache-2.0
+  github.com/prometheus/procfs v0.21.1                   Apache-2.0
+  golang.org/x/sys v0.47.0                               BSD-3-Clause
+  google.golang.org/protobuf v1.36.11                    BSD-3-Clause

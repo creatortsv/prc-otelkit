@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -197,22 +199,117 @@ func TestMiddlewareRecordsPanickingHandler(t *testing.T) {
 	mux.HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	})
+	mux.HandleFunc("GET /boom-after-write", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("boom after write")
+	})
 	h := Middleware(mux)
 
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("panic did not propagate: middleware must not swallow handler panics")
-			}
+	for _, path := range []string{"/boom", "/boom-after-write"} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatalf("%s: panic did not propagate: middleware must not swallow handler panics", path)
+				}
+			}()
+			serve(t, h, http.MethodGet, path)
 		}()
-		serve(t, h, http.MethodGet, "/boom")
-	}()
+	}
 
-	// No status was written before the panic, so the implicit-200 rule
-	// applies; the request must still be counted.
+	// A panicking request is an error: recorded as 500 even when no status
+	// was written before the panic — never the implicit 200.
 	assertCounters(t, "boom", []counterSeries{
-		{route: "GET /boom", method: http.MethodGet, status: "200", value: 1},
+		{route: "GET /boom", method: http.MethodGet, status: "500", value: 1},
+		{route: "GET /boom-after-write", method: http.MethodGet, status: "500", value: 1},
 	})
+}
+
+func TestMiddlewareNormalizesMethodLabel(t *testing.T) {
+	mux := http.NewServeMux()
+	// Method-agnostic registration: isolates the middleware's method-label
+	// normalization from the mux's own method matching (405s).
+	mux.HandleFunc("/probe", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := Middleware(mux)
+
+	cases := []struct{ method, want string }{
+		{http.MethodGet, http.MethodGet},
+		{http.MethodPatch, http.MethodPatch},
+		{http.MethodDelete, http.MethodDelete},
+		// Attacker-controlled or exotic tokens collapse into "other";
+		// matching is case-sensitive, so lowercase "get" is not the
+		// standard token and must be normalized too.
+		{"PROPFIND", otherMethod},
+		{"get", otherMethod},
+		{"EXOTIC", otherMethod},
+	}
+	for _, tc := range cases {
+		if rec := serve(t, h, tc.method, "/probe"); rec.Code != http.StatusOK {
+			t.Fatalf("%s /probe: status = %d", tc.method, rec.Code)
+		}
+	}
+
+	got := gatherCounters(t, "/probe")
+	seen := map[string]int{} // method label -> series count
+	for _, s := range got {
+		seen[s.method]++
+		if s.status != "200" {
+			t.Fatalf("series %s %s: status = %s, want 200", s.method, s.route, s.status)
+		}
+	}
+	for _, tc := range cases {
+		if seen[tc.want] == 0 {
+			t.Fatalf("method %q: no series normalized to %q; got %v", tc.method, tc.want, got)
+		}
+	}
+	for m := range seen {
+		if _, ok := allowedMethods[m]; m != otherMethod && !ok {
+			t.Fatalf("raw method token %q leaked into label unnormalized", m)
+		}
+	}
+	// The exotic tokens must all share one "other" series — bounded
+	// cardinality, not one series per distinct token.
+	if seen[otherMethod] != 1 {
+		t.Fatalf("expected exactly 1 %q series, got %d (series: %v)", otherMethod, seen[otherMethod], got)
+	}
+}
+
+func TestRecordingResponseWriterHijackAndUnwrapPassthrough(t *testing.T) {
+	// Underlying writer implementing http.Hijacker: Hijack must reach it.
+	fh := &fakeHijacker{ResponseWriter: httptest.NewRecorder()}
+	w := &recordingResponseWriter{ResponseWriter: fh}
+	if _, ok := any(w).(http.Hijacker); !ok {
+		t.Fatal("recordingResponseWriter does not satisfy http.Hijacker")
+	}
+	if _, _, err := w.Hijack(); err != nil {
+		t.Fatalf("Hijack passthrough: %v", err)
+	}
+	if !fh.hijacked {
+		t.Fatal("Hijack did not reach the underlying writer")
+	}
+
+	// Unwrap must expose the original writer for http.ResponseController.
+	if w.Unwrap() != http.ResponseWriter(fh) {
+		t.Fatal("Unwrap did not return the underlying ResponseWriter")
+	}
+
+	// Underlying writer without Hijacker: error, not panic.
+	bare := &recordingResponseWriter{ResponseWriter: httptest.NewRecorder()}
+	if _, _, err := bare.Hijack(); err == nil {
+		t.Fatal("Hijack on non-hijackable writer: want error")
+	}
+}
+
+// fakeHijacker is a ResponseWriter that additionally implements http.Hijacker.
+type fakeHijacker struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (f *fakeHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	f.hijacked = true
+	return nil, nil, nil
 }
 
 func TestMiddlewareDurationHistogramBucketsMatchContract(t *testing.T) {
