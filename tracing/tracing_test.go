@@ -168,7 +168,7 @@ func TestMiddlewareContinuesIncomingTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	if handlerTraceID != wantTrace {
 		t.Fatalf("handler TraceID = %q, want %q (trace continued from traceparent)", handlerTraceID, wantTrace)
@@ -199,7 +199,7 @@ func TestMiddlewareUnmatchedRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	spans := exp.recorded()
 	if len(spans) != 1 {
@@ -224,7 +224,7 @@ func TestMiddlewareMarksServerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	spans := exp.recorded()
 	if len(spans) != 1 {
@@ -244,7 +244,7 @@ func TestMiddlewareMarksServerError(t *testing.T) {
 func attrValue(span sdktrace.ReadOnlySpan, key string) string {
 	for _, a := range span.Attributes() {
 		if string(a.Key) == key {
-			return a.Value.Emit()
+			return a.Value.String()
 		}
 	}
 	return ""
@@ -269,7 +269,7 @@ func TestNewTransportInjectsTraceparent(t *testing.T) {
 	// The otelhttp client span ends when the response body is closed, so it
 	// must be drained and closed before the captured spans are asserted.
 	_, _ = io.Copy(io.Discard, res.Body)
-	res.Body.Close()
+	_ = res.Body.Close()
 	if !strings.HasPrefix(gotParent, "00-") {
 		t.Fatalf("traceparent header = %q, want W3C traceparent", gotParent)
 	}
