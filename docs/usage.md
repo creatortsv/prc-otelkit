@@ -1,7 +1,7 @@
 # prc-otelkit — Usage for service teams
 
 Two-line integration per service. Assumes Go 1.22+ `ServeMux` route patterns
-(all PRC services use them).
+(all PRC services use them). Part 1 covers metrics, part 2 tracing.
 
 ## 1. Add the dependency (pinned)
 
@@ -79,3 +79,95 @@ Prefix service-specific metric names with `prc_<service>_`.
 - Pod annotations for Prometheus scraping (`prometheus.io/scrape` etc.) are
   DevOps-owned in `prc-infra/k8s/30-services.yaml`; backend only guarantees
   the `/metrics` endpoint.
+
+# 2. Tracing (OTLP → Tempo, W3C traceparent)
+
+## Init once in main
+
+```go
+import "github.com/creatortsv/prc-otelkit/tracing"
+
+func main() {
+	ctx := context.Background()
+	shutdown, err := tracing.Init(ctx, tracing.Config{
+		ServiceName: "prc-auth",        // required — Tempo service.name
+		Environment: os.Getenv("ENV"),  // optional resource attribute
+		// OTLPEndpoint falls back to OTEL_EXPORTER_OTLP_ENDPOINT,
+		// which prc-infra injects into every deployment. Empty on both
+		// sides disables tracing entirely (local dev without Tempo).
+	})
+	if err != nil { log.Fatal(err) }
+	defer shutdown(ctx) // flushes pending spans on exit
+	// ...
+}
+```
+
+The export path is batched and non-blocking (default batch processor:
+5 s delay, bounded queue, drop on overflow) — spans never block requests.
+Sampling defaults to "everything"; set `SampleRatio` (0, 1] to thin out
+root spans — children follow their parent. The shutdown flush is bounded
+at 5 s: if Tempo is unreachable during pod termination, the tail batch is
+dropped instead of hanging the container past its grace period.
+
+## Wrap mux, client, and logger
+
+```go
+// server spans: continue incoming traceparent, span named "METHOD route"
+handler := tracing.Middleware(metrics.Middleware(mux))
+
+// client spans: inject traceparent into outgoing requests
+client := &http.Client{Transport: tracing.NewTransport(nil)} // or wrap your own transport
+
+// logs: every record under a traced context carries trace_id (Loki link)
+logger := slog.New(tracing.NewLogHandler(slog.NewJSONHandler(os.Stdout, nil)))
+```
+
+Order matters: `tracing.Middleware` outermost so the trace context wraps the
+whole RED recording. The `trace_id` key is a cross-repo contract (Loki
+derived field → Tempo link); never set it manually — `NewLogHandler` is its
+only writer.
+
+## Kafka via prc-eventkit
+
+Producers inject and consumers extract automatically once the service's
+prc-eventkit version includes propagation (producer adds W3C headers to the
+record, consumer extracts them around the handler) — no code needed in
+services. For header plumbing outside prc-eventkit:
+
+```go
+headers := tracing.Inject(ctx)        // nil when the ctx is untraced
+ctx = tracing.Extract(ctx, headers)   // continue the trace on the other side
+```
+
+## What you get in Tempo
+
+- One trace per user request: gateway → service spans linked by W3C
+  `traceparent`, continuing through Kafka into consumers via message
+  headers.
+- Spans named `GET /users/{id}`-style, agreeing with the metrics `route`
+  label; unmatched requests named `METHOD unmatched`.
+- Server spans marked with error status when the response status is ≥ 500;
+  a handler panic produces the same classification the RED middleware
+  records — a 500 error span with the panic value attached
+  (`http.ErrAbortHandler` aborts are recorded as 499, not errors).
+- `service.name` from `Config.ServiceName` (+ optional version/environment
+  attributes); sampling via `Config.SampleRatio` (ParentBased).
+
+## Gotchas
+
+- Call `defer shutdown(ctx)` — without it the last batch of spans may be
+  lost on exit. The flush is bounded at 5 s (see above), so it can never
+  exceed the Kubernetes grace period.
+- Do not call `.WithGroup(...)` on loggers whose records must link to
+  Tempo: `NewLogHandler` emits `trace_id` as a top-level record attribute,
+  and grouped attributes nest under the group key (e.g. `"req.trace_id"`),
+  which the Loki derivedFields link — matched against the top-level key —
+  will not resolve.
+- Always close response bodies of clients wrapped with
+  `tracing.NewTransport`: the client span ends when the body is closed (an
+  `otelhttp` contract), and an unclosed body leaks an open span.
+- 4xx responses are not span errors (matches the RED contract where error
+  classification is metric-side); 5xx are.
+- The endpoint URL is parsed like the OTel spec's env var: `http://` means
+  insecure plaintext to Tempo/collector; `https` uses TLS.
+

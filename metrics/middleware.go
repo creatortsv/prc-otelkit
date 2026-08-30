@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/creatortsv/prc-otelkit/internal/httpkit"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -38,39 +39,12 @@ import (
 // cardinality bounded.
 const unmatchedRoute = "unmatched"
 
-// allowedMethods is the fixed set of standard HTTP method tokens recorded
-// verbatim in the method label. net/http accepts arbitrary method tokens, so
-// anything outside this set — attacker-controlled or exotic — is collapsed
-// into otherMethod to keep the label cardinality bounded.
-var allowedMethods = map[string]struct{}{
-	http.MethodConnect: {},
-	http.MethodDelete:  {},
-	http.MethodGet:     {},
-	http.MethodHead:    {},
-	http.MethodOptions: {},
-	http.MethodPatch:   {},
-	http.MethodPost:    {},
-	http.MethodPut:     {},
-	http.MethodTrace:   {},
-}
-
-// otherMethod labels every request whose method is not in allowedMethods.
-const otherMethod = "other"
-
 // statusClientClosedRequest records handlers that deliberately panic with
 // http.ErrAbortHandler — the net/http-sanctioned signal for aborting the
 // connection without a response (used by ReverseProxy and streaming handlers
 // when the client disconnects). It is not a stdlib constant (499 is the
 // nginx convention for "client closed request"), so it is defined here.
 const statusClientClosedRequest = 499
-
-// normalizedMethod maps a raw method token onto its bounded label value.
-func normalizedMethod(method string) string {
-	if _, ok := allowedMethods[method]; ok {
-		return method
-	}
-	return otherMethod
-}
 
 // requestDurationBuckets are the histogram upper bounds, in seconds. The
 // standards §14 budget lines — 0.3 (target) and 1.0 (hard limit) — are
@@ -118,7 +92,7 @@ func Middleware(next http.Handler) http.Handler {
 			if route == "" {
 				route = unmatchedRoute
 			}
-			method := normalizedMethod(r.Method)
+			method := httpkit.NormalizeMethod(r.Method)
 			record := func(status int) {
 				requestsTotal.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
 				requestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())

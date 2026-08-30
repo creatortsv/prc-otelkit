@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/creatortsv/prc-otelkit/internal/httpkit"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -266,9 +267,9 @@ func TestMiddlewareNormalizesMethodLabel(t *testing.T) {
 		// Attacker-controlled or exotic tokens collapse into "other";
 		// matching is case-sensitive, so lowercase "get" is not the
 		// standard token and must be normalized too.
-		{"PROPFIND", otherMethod},
-		{"get", otherMethod},
-		{"EXOTIC", otherMethod},
+		{"PROPFIND", httpkit.OtherMethod},
+		{"get", httpkit.OtherMethod},
+		{"EXOTIC", httpkit.OtherMethod},
 	}
 	for _, tc := range cases {
 		if rec := serve(t, h, tc.method, "/probe"); rec.Code != http.StatusOK {
@@ -290,14 +291,14 @@ func TestMiddlewareNormalizesMethodLabel(t *testing.T) {
 		}
 	}
 	for m := range seen {
-		if _, ok := allowedMethods[m]; m != otherMethod && !ok {
+		if httpkit.NormalizeMethod(m) != m {
 			t.Fatalf("raw method token %q leaked into label unnormalized", m)
 		}
 	}
 	// The exotic tokens must all share one "other" series — bounded
 	// cardinality, not one series per distinct token.
-	if seen[otherMethod] != 1 {
-		t.Fatalf("expected exactly 1 %q series, got %d (series: %v)", otherMethod, seen[otherMethod], got)
+	if seen[httpkit.OtherMethod] != 1 {
+		t.Fatalf("expected exactly 1 %q series, got %d (series: %v)", httpkit.OtherMethod, seen[httpkit.OtherMethod], got)
 	}
 }
 
