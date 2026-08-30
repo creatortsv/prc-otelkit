@@ -57,6 +57,13 @@ var allowedMethods = map[string]struct{}{
 // otherMethod labels every request whose method is not in allowedMethods.
 const otherMethod = "other"
 
+// statusClientClosedRequest records handlers that deliberately panic with
+// http.ErrAbortHandler — the net/http-sanctioned signal for aborting the
+// connection without a response (used by ReverseProxy and streaming handlers
+// when the client disconnects). It is not a stdlib constant (499 is the
+// nginx convention for "client closed request"), so it is defined here.
+const statusClientClosedRequest = 499
+
 // normalizedMethod maps a raw method token onto its bounded label value.
 func normalizedMethod(method string) string {
 	if _, ok := allowedMethods[method]; ok {
@@ -97,8 +104,11 @@ var (
 // status was written — recording the implicit 200 would systematically
 // undercount the RED error-rate panel) and the panic is re-raised, so
 // net/http still aborts the connection and logs exactly as it would without
-// the middleware; no recovery is added here. A handler that returns without
-// writing anything is recorded with the implicit 200.
+// the middleware; no recovery is added here. The one exception is a panic
+// with http.ErrAbortHandler — the sanctioned deliberate connection-abort
+// signal — which is recorded as 499 (client closed request) instead of 500,
+// so it does not inflate the error-rate panel. A handler that returns
+// without writing anything is recorded with the implicit 200.
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rw := &recordingResponseWriter{ResponseWriter: w}
@@ -114,7 +124,15 @@ func Middleware(next http.Handler) http.Handler {
 				requestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
 			}
 			if p := recover(); p != nil {
-				record(http.StatusInternalServerError)
+				if p == http.ErrAbortHandler {
+					// Deliberate connection abort (client disconnect during
+					// streaming/proxying), not a server error — record 499
+					// instead of 500 and re-raise so net/http still aborts
+					// the connection without logging it as a panic.
+					record(statusClientClosedRequest)
+				} else {
+					record(http.StatusInternalServerError)
+				}
 				panic(p)
 			}
 			record(rw.statusOrOK())
