@@ -224,6 +224,32 @@ func TestMiddlewareRecordsPanickingHandler(t *testing.T) {
 	})
 }
 
+func TestMiddlewareRecordsErrAbortHandlerAs499(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /abort", func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	})
+	h := Middleware(mux)
+
+	// http.ErrAbortHandler must re-raise (net/http relies on it to abort
+	// the connection without logging a panic) — the middleware may not
+	// swallow it like a generic panic.
+	func() {
+		defer func() {
+			if r := recover(); r != http.ErrAbortHandler {
+				t.Fatalf("panic = %v, want http.ErrAbortHandler propagated", r)
+			}
+		}()
+		serve(t, h, http.MethodGet, "/abort")
+	}()
+
+	// A deliberate connection abort is not a server error: recorded as 499
+	// so client disconnects do not inflate the RED error-rate panel.
+	assertCounters(t, "abort", []counterSeries{
+		{route: "GET /abort", method: http.MethodGet, status: "499", value: 1},
+	})
+}
+
 func TestMiddlewareNormalizesMethodLabel(t *testing.T) {
 	mux := http.NewServeMux()
 	// Method-agnostic registration: isolates the middleware's method-label
