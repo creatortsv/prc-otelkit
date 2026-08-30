@@ -122,7 +122,10 @@ if rec := recover(); rec != nil {
 `sentry/sentry_test.go` pins the contract by asserting on the serialized
 envelope sent to a fake ingestion endpoint:
 
-- `SendDefaultPII` is hardwired `false` and not configurable.
+- Automatic data collection is hardwired **off** via `ClientOptions.DataCollection`
+  (cookies, HTTP headers, bodies, query params, user info) and not
+  configurable — equivalent to the deprecated `SendDefaultPII=false`, but
+  stricter: categories are off, not merely denylisted.
 - Request context reported is **method + path only** — no query string, no
   body, no cookies, no headers.
 - Client-level `BeforeSend` additionally filters any request data through a

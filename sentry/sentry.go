@@ -4,8 +4,10 @@
 //
 // Privacy contract (prc-docs/operations/observability.md, VENA-154):
 //
-//   - SendDefaultPII is always false and must never be set to true by any
-//     service. This package never exposes a way to enable it.
+//   - Automatic data collection is disabled entirely (cookies, HTTP
+//     headers, bodies, query params, user info) via ClientOptions
+//     .DataCollection. `send_default_pii` must never be enabled by any
+//     service; this package never exposes a way to enable it.
 //   - Request context reported to Sentry is built from the HTTP method and
 //     the request path ONLY — no query string, no body, no headers, no
 //     cookies. BeforeSend additionally scrubs any request data attached by
@@ -62,9 +64,20 @@ func Init(cfg Config) (enabled bool, shutdown func(context.Context), err error) 
 		Release:          cfg.Release,
 		ServerName:       cfg.ServiceName,
 		AttachStacktrace: true,
-		// Hard privacy guarantee: never send PII by default. This flag is
-		// intentionally not configurable through this package.
-		SendDefaultPII:   false,
+		// Hard privacy guarantee: no automatic data collection at all. This
+		// is intentionally stricter than the deprecated SendDefaultPII=false
+		// and is not configurable through this package — only scrubbed,
+		// explicit capture (method+path) contributes request data.
+		DataCollection: &sentrygo.DataCollection{
+			UserInfo: sentrygo.Set(false),
+			Cookies:  &sentrygo.KeyValueCollectionBehavior{Mode: sentrygo.CollectionOff},
+			HTTPHeaders: &sentrygo.HeaderCollectionConfig{
+				Request:  &sentrygo.KeyValueCollectionBehavior{Mode: sentrygo.CollectionOff},
+				Response: &sentrygo.KeyValueCollectionBehavior{Mode: sentrygo.CollectionOff},
+			},
+			HTTPBodies:  []sentrygo.BodyType{},
+			QueryParams: &sentrygo.KeyValueCollectionBehavior{Mode: sentrygo.CollectionOff},
+		},
 		BeforeSend:       scrubEvent,
 		BeforeBreadcrumb: dropSensitiveBreadcrumb,
 	}); err != nil {
